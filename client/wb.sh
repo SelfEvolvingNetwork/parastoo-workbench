@@ -6,6 +6,8 @@
 #   sync <local> <remote>   آپلود فایل به سرور (base64 chunked + sha256)
 #   fetch <remote> <local>  دانلود فایل از سرور (تا ۲۵۶KB)
 #   gate [sha|branch]       دروازهٔ سبز کامل روی سرور، روی درخت کاریِ آن کامیت
+#   publish [slug]          سیفِ انتشار: باندل origin/main..HEAD به سرور، پوش از سرور
+#                           با توکن لحظه‌ای broker (هیچ رازی ذخیره/لاگ نمی‌شود)
 #   deploy                  استقرار صریح پرستو: POST /api/admin/parastoo/update
 #   verify [sha]            پول /api/version تا کامیت مستقر شود (+ e2e_live اگر هست)
 #   status                  نسخهٔ مستقر پنل + وضعیت access-agent
@@ -22,7 +24,7 @@ WB_PANEL="${WB_PANEL:-https://panel.zeolitecenter.ir}"
 WB_WORKBENCH_URL="https://github.com/SelfEvolvingNetwork/parastoo-workbench"
 WB_PARASTOO_URL="https://github.com/SelfEvolvingNetwork/parastoo"
 
-usage() { sed -n '2,15p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,16p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 1
 [ -r "$WB_ENV" ] || { echo "خطا: فایل اتصال پل یافت نشد: $WB_ENV" >&2; exit 2; }
 command -v jq >/dev/null || { echo "خطا: jq لازم است" >&2; exit 2; }
@@ -126,6 +128,62 @@ cmd_gate() {
   [ "$marker" = "GATE_RESULT=PASS" ]
 }
 
+# ---------- سیفِ انتشار (publish airlock) ----------
+
+cmd_publish() {  # [slug=parastoo] — پوش از سرور، بدون توکن در دیسک/لاگ
+  local slug="${1:-parastoo}"
+  local repo_dir head_sha n bundle rb cred b64 tok sha_r push_out rc
+  repo_dir=$(cd "$(dirname "$(dirname "$WB_ENV")")" && pwd)
+  (
+    cd "$repo_dir" || exit 2
+    [ -z "$(git status --porcelain)" ] || { echo "خطا: درخت کاری ناپاک است — اول کامیت کن" >&2; exit 2; }
+  ) || return 2
+  git -C "$repo_dir" fetch --quiet origin main 2>/dev/null \
+    || echo "[هشدار] fetch محلی ناموفق — از origin/main موجود استفاده می‌شود" >&2
+  head_sha=$(git -C "$repo_dir" rev-parse HEAD)
+  n=$(git -C "$repo_dir" rev-list --count "origin/main..HEAD" 2>/dev/null || echo 0)
+  if [ "$n" -eq 0 ]; then
+    echo "چیزی برای انتشار نیست (origin/main == HEAD: ${head_sha:0:8}) — همگامی سرور تازه می‌شود"
+    rexec "git -C $WB_SANDBOX/parastoo fetch --quiet origin main" >/dev/null || true
+    return 0
+  fi
+  echo "انتشار $n کامیت از راه سیفِ سرور (HEAD: ${head_sha:0:8}) …"
+  bundle="/tmp/pst-publish-$(date +%s).bundle"
+  ( cd "$repo_dir" && git bundle create "$bundle" "origin/main..HEAD" ) >/dev/null || return 2
+  local bsize; bsize=$(stat -c%s "$bundle")
+  [ "$bsize" -le 2097152 ] || { echo "باندل ${bsize}B از سقف ۲MB گذشت — این‌بار پوش محلی بزن" >&2; rm -f "$bundle"; return 2; }
+  rb="$WB_SANDBOX/tmp/$(basename "$bundle")"
+  # ۱) سرور اول origin/main را تازه کند (پیش‌نیازهای باندل)
+  rexec "git -C $WB_SANDBOX/parastoo fetch --quiet origin main" >/dev/null \
+    || { echo "خطا: fetch سرور ناموفق" >&2; rm -f "$bundle"; return 125; }
+  # ۲) باندل → سرور
+  cmd_sync "$bundle" "$rb" || { rm -f "$bundle"; rexec "rm -f $rb" >/dev/null || true; return 125; }
+  rm -f "$bundle"
+  # ۳) توکن لحظه‌ای از broker — هرگز در دیسک/لاگ ذخیره نمی‌شود
+  tok=$(bash "$WB_BRIDGE" /api/github/token -X POST \
+    -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"purpose":"workbench publish airlock"}' | jq -r '.token // empty')
+  [ -n "$tok" ] || { echo "خطا: broker توکن نداد" >&2; rexec "rm -f $rb" >/dev/null || true; return 125; }
+  b64=$(printf '%s' "$tok" | base64 -w0); unset tok
+  cred="/tmp/pst-cred-$$-$RANDOM"
+  rexec "printf '%s' '$b64' | base64 -d > $cred && chmod 600 $cred" >/dev/null \
+    || { echo "خطا: نوشتن اعتبار موقت روی سرور" >&2; rexec "rm -f $rb $cred" >/dev/null || true; return 125; }
+  unset b64
+  # ۴) unbundle + پوش از سرور
+  push_out=$(rexec "git -C $WB_SANDBOX/parastoo bundle unbundle $rb >/dev/null 2>&1 && git -C $WB_SANDBOX/parastoo -c credential.helper='store --file=$cred' push https://github.com/$slug ${head_sha}:refs/heads/main")
+  rc=$?
+  # ۵) راستی‌آزمایی + پاک‌سازی فوری اعتبار و باندل (همیشه)
+  sha_r=$(rexec "git ls-remote https://github.com/$slug refs/heads/main | cut -f1; rm -f $cred $rb") || sha_r=""
+  if [ "$rc" -eq 0 ] && [ "$sha_r" = "$head_sha" ]; then
+    echo "publish ✓ — $slug@origin/main == ${head_sha:0:8} (پوش از سرور انجام شد)"
+    return 0
+  fi
+  echo "خطا: پوش ناموفق (rc=$rc، ریموت=${sha_r:0:8}) — خروجی پوش:" >&2
+  printf '%s\n' "$push_out" >&2
+  return 1
+}
+
 # ---------- استقرار و راستی‌آزمایی ----------
 
 cmd_deploy() {
@@ -186,6 +244,7 @@ case "$1" in
   sync)   [ $# -ge 3 ] || usage 1; cmd_sync "$2" "$3" ;;
   fetch)  [ $# -ge 3 ] || usage 1; cmd_fetch "$2" "$3" ;;
   gate)   shift; cmd_gate "${1:-origin/main}" ;;
+  publish) shift; cmd_publish "${1:-parastoo}" ;;
   deploy) cmd_deploy ;;
   verify) shift; cmd_verify "${1:-}" ;;
   status) cmd_status ;;
