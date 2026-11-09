@@ -135,10 +135,10 @@ cmd_gate() {
 
 # ---------- سیفِ انتشار (publish airlock) ----------
 
-cmd_publish() {  # [slug=parastoo] — پوش از سرور، بدون توکن در دیسک/لاگ
+cmd_publish() {  # [slug] — پوش از سرور، بدون توکن در دیسک/لاگ (WB_REPO_DIR مخزن مبدأ)
   local slug="${1:-SelfEvolvingNetwork/parastoo}"
   local repo_dir head_sha n bundle rb cred b64 tok sha_r push_out rc
-  repo_dir=$(cd "$(dirname "$(dirname "$WB_ENV")")" && pwd)
+  repo_dir="${WB_REPO_DIR:-$(cd "$(dirname "$(dirname "$WB_ENV")")" && pwd)}"
   (
     cd "$repo_dir" || exit 2
     [ -z "$(git status --porcelain)" ] || { echo "خطا: درخت کاری ناپاک است — اول کامیت کن" >&2; exit 2; }
@@ -192,10 +192,8 @@ cmd_publish() {  # [slug=parastoo] — پوش از سرور، بدون توکن 
 # ---------- استقرار و راستی‌آزمایی ----------
 
 cmd_deploy() {
-  echo "استقرار صریح پرستو از راه پل …"
-  bash "$WB_BRIDGE" /api/admin/parastoo/update -X POST \
-    -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
-    -H "Content-Type: application/json" -d '{}'
+  echo "استقرار صریح پرستو از راه کارگاه — توکن ادمین فقط در حافظهٔ سرور مصرف می‌شود …"
+  rexec 'U=$(sudo access-agent url); T=$(sudo access-agent show-admin-token); curl -sk -X POST -H "Authorization: Bearer $T" -H "Content-Type: application/json" -d "{}" "$U/api/admin/parastoo/update"; rc=$?; unset T U; exit $rc'
   echo ""
 }
 
