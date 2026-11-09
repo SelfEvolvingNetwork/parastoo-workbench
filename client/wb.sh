@@ -3,6 +3,7 @@
 #
 # Usage: wb.sh <command> [args]
 #   exec '<cmd>'            اجرای فرمان روی سرور (stdout + کد خروج واقعی)
+#   chat poll|reply         چت سرور مالک↔عامل — poll پیام‌های تازه / reply پاسخ (CHAT_ROOM)
 #   sync <local> <remote>   آپلود فایل به سرور (base64 chunked + sha256)
 #   fetch <remote> <local>  دانلود فایل از سرور (تا ۶۴KB)
 #   gate [sha|branch]       دروازهٔ سبز کامل روی سرور، روی درخت کاریِ آن کامیت
@@ -289,8 +290,35 @@ cmd_update() {
   rexec "if [ -d $WB_SANDBOX/workbench/.git ]; then git -C $WB_SANDBOX/workbench pull --ff-only; else git clone --quiet $WB_WORKBENCH_URL $WB_SANDBOX/workbench; fi && bash $WB_SANDBOX/workbench/server/bootstrap.sh"
 }
 
+# ---------- چت سرور (چت‌روم پل v0.6.0 — قرارداد CHAT_ROOM.fa.md) ----------
+
+cmd_chat() {  # poll [since_id] | reply '<text>' [reply_to]
+  local sub="${1:-poll}"; shift || true
+  local pem="${WB_PEM:-${WB_ENV%/*}/access-agent.pem}"
+  case "$sub" in
+    poll)
+      curl -sS --max-time 30 --cacert "$pem" \
+        -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
+        "$ACCESS_AGENT_URL/api/agent/chat/poll?since_id=${1:-0}&limit=200" | jq .
+      ;;
+    reply)
+      local text="${1:?متن لازم است}" rid="${2:-}" payload
+      payload=$(python3 -c 'import json,sys
+body={"text":sys.argv[1]}
+if sys.argv[2]: body["reply_to"]=int(sys.argv[2])
+print(json.dumps(body,ensure_ascii=False))' "$text" "$rid")
+      curl -sS --max-time 30 --cacert "$pem" -X POST \
+        -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
+        -H "Content-Type: application/json" -d "$payload" \
+        "$ACCESS_AGENT_URL/api/agent/chat/reply" | jq .
+      ;;
+    *) echo "usage: wb chat poll [since_id] | reply '<text>' [reply_to]" >&2; return 2 ;;
+  esac
+}
+
 case "$1" in
   exec)   [ $# -ge 2 ] || usage 1; cmd_exec "$2" ;;
+  chat)   shift; cmd_chat "${1:-poll}" "${2:-}" "${3:-}" ;;
   sync)   [ $# -ge 3 ] || usage 1; cmd_sync "$2" "$3" ;;
   fetch)  [ $# -ge 3 ] || usage 1; cmd_fetch "$2" "$3" ;;
   gate)   shift; cmd_gate "${1:-origin/main}" ;;
