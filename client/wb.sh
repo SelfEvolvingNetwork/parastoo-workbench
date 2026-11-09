@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# کارگاه پرستو — کلاینت محلی عامل. همهٔ ارتباط از راه پل access-agent.
+# کارگاه پرستو — کلاینت عامل (پایانهٔ نازک). چرخهٔ توسعه کاملاً روی کارگاه سرور است.
 #
 # Usage: wb.sh <command> [args]
 #   exec '<cmd>'            اجرای فرمان روی سرور (stdout + کد خروج واقعی)
 #   sync <local> <remote>   آپلود فایل به سرور (base64 chunked + sha256)
-#   fetch <remote> <local>  دانلود فایل از سرور (تا ۲۵۶KB)
+#   fetch <remote> <local>  دانلود فایل از سرور (تا ۶۴KB)
 #   gate [sha|branch]       دروازهٔ سبز کامل روی سرور، روی درخت کاریِ آن کامیت
-#   publish [slug]          سیفِ انتشار: باندل origin/main..HEAD به سرور، پوش از سرور
-#                           با توکن لحظه‌ای broker (هیچ رازی ذخیره/لاگ نمی‌شود)
-#   deploy                  استقرار صریح پرستو: POST /api/admin/parastoo/update
+#   pushsrv [repo]          پوش زادهٔ سرور — مسیر اصلی: HEAD کلون سرور → main گیت‌هاب
+#                           با توکن لحظه‌ای broker (repo: parastoo|parastoo-workbench)
+#   publish [slug]          (میراث) سیفِ انتشار از مخزن محلی: باندل origin/main..HEAD →
+#                           سرور، پوش از سرور با توکن لحظه‌ای broker
+#   deploy                  استقرار صریح پرستو: POST /api/admin/parastoo/update (سمت سرور)
 #   verify [sha]            پول /api/version تا کامیت مستقر شود (+ e2e_live اگر هست)
 #   status                  نسخهٔ مستقر پنل + وضعیت access-agent
 #   doctor                  خودآزمایی کارگاه روی سرور
@@ -24,7 +26,7 @@ WB_PANEL="${WB_PANEL:-https://panel.zeolitecenter.ir}"
 WB_WORKBENCH_URL="https://github.com/SelfEvolvingNetwork/parastoo-workbench"
 WB_PARASTOO_URL="https://github.com/SelfEvolvingNetwork/parastoo"
 
-usage() { sed -n '2,16p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,17p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 1
 [ -r "$WB_ENV" ] || { echo "خطا: فایل اتصال پل یافت نشد: $WB_ENV" >&2; exit 2; }
 command -v jq >/dev/null || { echo "خطا: jq لازم است" >&2; exit 2; }
@@ -189,6 +191,50 @@ cmd_publish() {  # [slug] — پوش از سرور، بدون توکن در دی
   return 1
 }
 
+# ---------- پوش زادهٔ سرور (server-born push) ----------
+
+cmd_pushsrv() {  # [parastoo|parastoo-workbench] — HEAD کلون سرور → main گیت‌هاب
+  local repo="${1:-parastoo}" slug sdir head_sha pre n tok b64 cred push_out rc sha_r
+  case "$repo" in
+    parastoo)           slug="SelfEvolvingNetwork/parastoo";           sdir="$WB_SANDBOX/parastoo" ;;
+    parastoo-workbench) slug="SelfEvolvingNetwork/parastoo-workbench"; sdir="$WB_SANDBOX/workbench" ;;
+    *) echo "خطا: مخزن ناشناخته: $repo (parastoo|parastoo-workbench)" >&2; return 2 ;;
+  esac
+  head_sha=$(rexec "git -C $sdir rev-parse HEAD") \
+    || { echo "خطا: کلون سرور در دسترس نیست: $sdir" >&2; return 125; }
+  # پیش‌شرط‌ها: درخت پاک + شاخه main + جلوتر از origin/main (وگرنه پوش fast-forward نیست)
+  pre=$(rexec "cd $sdir && git fetch --quiet origin main && [ -z \"\$(git status --porcelain)\" ] && [ \"\$(git rev-parse --abbrev-ref HEAD)\" = main ] && git rev-list --count origin/main..HEAD && git merge-base --is-ancestor origin/main HEAD && echo PRE_OK") \
+    || { echo "خطا: پیش‌شرط پوش سرور برقرار نیست (درخت ناپاک / شاخه main نیست / عقب‌تر از origin/main) — $sdir" >&2; return 2; }
+  n=$(printf '%s' "$pre" | grep -v PRE_OK | tail -1)
+  case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -eq 0 ]; then
+    echo "چیزی برای پوش نیست ($sdir HEAD == origin/main: ${head_sha:0:8})"
+    return 0
+  fi
+  echo "پوش زادهٔ سرور: $repo @ $sdir → $slug (${head_sha:0:8}) …"
+  # توکن لحظه‌ای از broker — هرگز در دیسک/لاگ ذخیره نمی‌شود
+  tok=$(bash "$WB_BRIDGE" /api/github/token -X POST \
+    -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"purpose":"server-born push (wb pushsrv)"}' | jq -r '.token // empty')
+  [ -n "$tok" ] || { echo "خطا: broker توکن نداد" >&2; return 125; }
+  b64=$(printf 'https://parastoo-agent:%s@github.com' "$tok" | base64 -w0); unset tok
+  cred="/tmp/pst-cred-$$-$RANDOM"
+  rexec "printf '%s' '$b64' | base64 -d > $cred && chmod 600 $cred" >/dev/null \
+    || { echo "خطا: نوشتن اعتبار موقت روی سرور" >&2; rexec "rm -f $cred" >/dev/null || true; return 125; }
+  unset b64
+  push_out=$(rexec "git -C $sdir -c credential.helper='store --file=$cred' push https://github.com/$slug ${head_sha}:refs/heads/main 2>&1")
+  rc=$?
+  sha_r=$(rexec "git ls-remote https://github.com/$slug refs/heads/main | cut -f1; rm -f $cred") || sha_r=""
+  if [ "$rc" -eq 0 ] && [ "$sha_r" = "$head_sha" ]; then
+    echo "pushsrv ✓ — $slug@origin/main == ${head_sha:0:8} (از کلون سرور پوش شد)"
+    return 0
+  fi
+  echo "خطا: پوش سرور ناموفق (rc=$rc، ریموت=${sha_r:0:8}) — خروجی پوش:" >&2
+  printf '%s\n' "$push_out" >&2
+  return 1
+}
+
 # ---------- استقرار و راستی‌آزمایی ----------
 
 cmd_deploy() {
@@ -198,9 +244,11 @@ cmd_deploy() {
 }
 
 cmd_verify() {
-  local sha="${1:-}" i v
+  local sha="${1:-}" i v repo_dir
   if [ -z "$sha" ]; then
-    sha=$(git -C "$(dirname "$(dirname "$WB_ENV")")" rev-parse HEAD 2>/dev/null || true)
+    # حالت فقط-سرور: پیش‌فرض = origin/main از دید کلون سرور؛ مخزن محلی فقط میراث/پشتیبان
+    sha=$(rexec "git -C $WB_SANDBOX/parastoo rev-parse origin/main 2>/dev/null") || true
+    [ -n "$sha" ] || sha=$(git -C "$(dirname "$(dirname "$WB_ENV")")" rev-parse HEAD 2>/dev/null || true)
   fi
   [ -n "$sha" ] || { usage 1; return 2; }
   echo "انتظار برای استقرار $sha روی $WB_PANEL (حداکثر ۸ دقیقه) …"
@@ -208,7 +256,6 @@ cmd_verify() {
     v=$(curl -fsS --max-time 15 "$WB_PANEL/api/version" 2>/dev/null || true)
     if printf '%s' "$v" | grep -q "\"commit\":\"$sha\""; then
       echo "deployed ✓ $(printf '%s' "$v" | head -c 200)"
-      local repo_dir
       repo_dir=$(cd "$(dirname "$(dirname "$WB_ENV")")" && pwd)
       if [ -f "$repo_dir/tests/e2e_live.py" ]; then
         echo "--- e2e_live ---"
@@ -248,6 +295,7 @@ case "$1" in
   fetch)  [ $# -ge 3 ] || usage 1; cmd_fetch "$2" "$3" ;;
   gate)   shift; cmd_gate "${1:-origin/main}" ;;
   publish) shift; cmd_publish "${1:-SelfEvolvingNetwork/parastoo}" ;;
+  pushsrv) shift; cmd_pushsrv "${1:-parastoo}" ;;
   deploy) cmd_deploy ;;
   verify) shift; cmd_verify "${1:-}" ;;
   status) cmd_status ;;
