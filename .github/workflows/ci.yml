@@ -1,0 +1,23 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash syntax
+        run: |
+          for f in server/*.sh client/wb.sh; do
+            bash -n "$f"
+          done
+      - name: python syntax
+        run: python3 -m py_compile server/selfcheck.py
+      - name: shellcheck (errors only)
+        run: |
+          if command -v shellcheck >/dev/null; then
+            shellcheck --severity=error server/*.sh client/wb.sh
+          else
+            echo "shellcheck not available — skipped"
+          fi
