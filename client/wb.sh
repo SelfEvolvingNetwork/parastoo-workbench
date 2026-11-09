@@ -55,20 +55,25 @@ cmd_exec() { rexec "$1"; }
 
 # ---------- انتقال فایل ----------
 
-cmd_sync() {  # <local> <remote-abs>
-  local local_f="$1" remote="$2" b64 len off chunk payload sha_r sha_l
+cmd_sync() {  # <local> <remote-abs> — سقف فرمان پل ۸۰۰۰ کاراکتر است (اندازه‌گیری ۲۰۲۶-۱۱-۱۰)
+  local local_f="$1" remote="$2" b64 len off chunk payload resp ok sha_r sha_l
   [ -f "$local_f" ] || { echo "فایل محلی نیست: $local_f" >&2; return 2; }
   len=$(stat -c%s "$local_f")
   [ "$len" -le 2097152 ] || { echo "سقف sync: ۲MB" >&2; return 2; }
   b64=$(base64 -w0 "$local_f")
   rexec "rm -f '$remote'" || true
-  for ((off=0; off<${#b64}; off+=24000)); do
-    chunk=${b64:off:24000}   # ۲۴۰۰۰ مضرب ۴ است → قطعه‌ها decode تمیز
+  local ci=0
+  for ((off=0; off<${#b64}; off+=7600)); do   # ۷۶۰۰ مضرب ۴ + جا برای wrapper زیر ۸۰۰۰
+    ci=$((ci+1))
+    chunk=${b64:off:7600}
     payload=$(python3 -c 'import json,sys; print(json.dumps({"cmd": sys.argv[1]}))' \
-      "printf '%s' '${chunk}' >> '$remote'")
-    bash "$WB_BRIDGE" /api/exec -X POST \
+      "printf '%s' '${chunk}' | base64 -d >> '$remote'")
+    resp=$(bash "$WB_BRIDGE" /api/exec -X POST \
       -H "Authorization: Bearer $ACCESS_AGENT_AGENT_TOKEN" \
-      -H "Content-Type: application/json" -d "$payload" >/dev/null || { echo "خطای پل در قطعهٔ $((off/24000+1))" >&2; return 125; }
+      -H "Content-Type: application/json" -d "$payload") \
+      || { echo "خطای پل در قطعهٔ $ci" >&2; return 125; }
+    ok=$(printf '%s' "$resp" | jq -r '.ok // false')
+    [ "$ok" = "true" ] || { echo "خطا: پل قطعهٔ $ci را رد کرد: $(printf '%s' "$resp" | head -c 200)" >&2; return 125; }
     printf '.' >&2
   done
   echo "" >&2
@@ -81,10 +86,10 @@ cmd_sync() {  # <local> <remote-abs>
   fi
 }
 
-cmd_fetch() {  # <remote-abs> <local>
+cmd_fetch() {  # <remote-abs> <local> — پاسخ پل بزرگ است (≥۴۰KB تست‌شده)؛ فرمان کوچک می‌ماند
   local remote="$1" local_f="$2" size b64
   size=$(rexec "stat -c%s '$remote'") || return 125
-  [ "$size" -le 262144 ] || { echo "سقف fetch: ۲۵۶KB (این فایل: ${size}B)" >&2; return 2; }
+  [ "$size" -le 65536 ] || { echo "سقف fetch: ۶۴KB (این فایل: ${size}B)" >&2; return 2; }
   b64=$(rexec "base64 -w0 '$remote'") || return 125
   printf '%s' "$b64" | base64 -d > "$local_f"
   local sha_r sha_l
