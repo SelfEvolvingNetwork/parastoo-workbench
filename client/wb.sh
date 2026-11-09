@@ -136,7 +136,7 @@ cmd_gate() {
 # ---------- سیفِ انتشار (publish airlock) ----------
 
 cmd_publish() {  # [slug=parastoo] — پوش از سرور، بدون توکن در دیسک/لاگ
-  local slug="${1:-parastoo}"
+  local slug="${1:-SelfEvolvingNetwork/parastoo}"
   local repo_dir head_sha n bundle rb cred b64 tok sha_r push_out rc
   repo_dir=$(cd "$(dirname "$(dirname "$WB_ENV")")" && pwd)
   (
@@ -249,7 +249,7 @@ case "$1" in
   sync)   [ $# -ge 3 ] || usage 1; cmd_sync "$2" "$3" ;;
   fetch)  [ $# -ge 3 ] || usage 1; cmd_fetch "$2" "$3" ;;
   gate)   shift; cmd_gate "${1:-origin/main}" ;;
-  publish) shift; cmd_publish "${1:-parastoo}" ;;
+  publish) shift; cmd_publish "${1:-SelfEvolvingNetwork/parastoo}" ;;
   deploy) cmd_deploy ;;
   verify) shift; cmd_verify "${1:-}" ;;
   status) cmd_status ;;
