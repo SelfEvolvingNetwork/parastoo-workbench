@@ -83,7 +83,7 @@ def main() -> int:
         checks["tmp:writable"] = False
 
     # ۷) منابع
-    du, _ = shutil.disk_usage("/")
+    du = shutil.disk_usage("/")
     mem = None
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
