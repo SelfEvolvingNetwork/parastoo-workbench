@@ -170,13 +170,13 @@ cmd_publish() {  # [slug=parastoo] — پوش از سرور، بدون توکن 
     -H "Content-Type: application/json" \
     -d '{"purpose":"workbench publish airlock"}' | jq -r '.token // empty')
   [ -n "$tok" ] || { echo "خطا: broker توکن نداد" >&2; rexec "rm -f $rb" >/dev/null || true; return 125; }
-  b64=$(printf '%s' "$tok" | base64 -w0); unset tok
+  b64=$(printf 'https://parastoo-agent:%s@github.com' "$tok" | base64 -w0); unset tok
   cred="/tmp/pst-cred-$$-$RANDOM"
   rexec "printf '%s' '$b64' | base64 -d > $cred && chmod 600 $cred" >/dev/null \
     || { echo "خطا: نوشتن اعتبار موقت روی سرور" >&2; rexec "rm -f $rb $cred" >/dev/null || true; return 125; }
   unset b64
   # ۴) unbundle + پوش از سرور
-  push_out=$(rexec "git -C $WB_SANDBOX/parastoo bundle unbundle $rb >/dev/null 2>&1 && git -C $WB_SANDBOX/parastoo -c credential.helper='store --file=$cred' push https://github.com/$slug ${head_sha}:refs/heads/main")
+  push_out=$(rexec "git -C $WB_SANDBOX/parastoo bundle unbundle $rb >/dev/null 2>&1 && git -C $WB_SANDBOX/parastoo -c credential.helper='store --file=$cred' push https://github.com/$slug ${head_sha}:refs/heads/main 2>&1")
   rc=$?
   # ۵) راستی‌آزمایی + پاک‌سازی فوری اعتبار و باندل (همیشه)
   sha_r=$(rexec "git ls-remote https://github.com/$slug refs/heads/main | cut -f1; rm -f $cred $rb") || sha_r=""
